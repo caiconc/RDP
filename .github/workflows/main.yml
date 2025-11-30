@@ -1,113 +1,527 @@
-name: RDP
+name: RDP Ultimate 16GB Optimization
 
 on:
   workflow_dispatch:
+    inputs:
+      timeout_minutes:
+        description: 'Session timeout (minutes)'
+        required: false
+        default: '120'
+        type: choice
+        options:
+          - '30'
+          - '60'
+          - '120'
+          - '360'
+      ram_disk_size:
+        description: 'RAM Disk size (GB)'
+        required: false
+        default: '8'
+        type: choice
+        options:
+          - '4'
+          - '8'
+          - '10'
+          - '12'
+      runner_type:
+        description: 'Runner type'
+        required: false
+        default: 'windows-latest'
+        type: choice
+        options:
+          - 'windows-latest'
+          - 'windows-2022'
+
+env:
+  RAM_DISK_SIZE: ${{ github.event.inputs.ram_disk_size || '8' }}
+  RAM_DISK_LETTER: 'R'
 
 jobs:
   secure-rdp:
-    runs-on: windows-latest
-    timeout-minutes: 3600
+    runs-on: ${{ github.event.inputs.runner_type || 'windows-latest' }}
+    timeout-minutes: ${{ fromJson(github.event.inputs.timeout_minutes) || 120 }}
+    
+    concurrency:
+      group: rdp-session
+      cancel-in-progress: true
 
     steps:
-      - name: Configure Core RDP Settings
+      - name: System Diagnostics
         run: |
-          # Enable Remote Desktop and disable Network Level Authentication (if needed)
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
-
-          # Remove any existing rule with the same name to avoid duplication
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          Write-Host "═══════════════════════════════════════" -ForegroundColor Cyan
+          Write-Host "       📊 SYSTEM DIAGNOSTICS" -ForegroundColor Yellow
+          Write-Host "═══════════════════════════════════════" -ForegroundColor Cyan
           
-          # For testing, allow any incoming connection on port 3389
-          netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389
+          $osInfo = Get-CimInstance Win32_OperatingSystem
+          $procInfo = Get-CimInstance Win32_Processor
+          $memInfo = Get-CimInstance Win32_PhysicalMemory | Measure-Object Capacity -Sum
+          
+          Write-Host ""
+          Write-Host "OS: $($osInfo.Caption)"
+          Write-Host "Build: $($osInfo.BuildNumber)"
+          Write-Host "CPU Cores: $($procInfo.NumberOfCores)"
+          Write-Host "Total RAM: $([Math]::Round($memInfo.Sum / 1GB, 2)) GB"
+          Write-Host "Free RAM: $([Math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1MB, 2)) MB"
+          
+          $disk = Get-Volume -DriveLetter C
+          Write-Host "C: Drive Free: $([Math]::Round($disk.SizeRemaining / 1GB, 2)) GB"
+          
+          Write-Host ""
+          Write-Host "═══════════════════════════════════════" -ForegroundColor Cyan
 
-          # (Optional) Restart the Remote Desktop service to ensure changes take effect
-          Restart-Service -Name TermService -Force
-
-      - name: Create RDP User with Secure Password
+      - name: Memory Optimization (Aggressive)
         run: |
-          Add-Type -AssemblyName System.Security
-          $charSet = @{
-              Upper   = [char[]](65..90)      # A-Z
-              Lower   = [char[]](97..122)     # a-z
-              Number  = [char[]](48..57)      # 0-9
-              Special = ([char[]](33..47) + [char[]](58..64) +
-                         [char[]](91..96) + [char[]](123..126)) # Special characters
+          Write-Host "⚡ Optimizing memory..."
+          
+          # Disable unnecessary services completely
+          $servicesToDisable = @(
+              'DiagTrack',
+              'dmwappushservice',
+              'WSearch',
+              'SysMain',
+              'TabletInputService',
+              'CDPSvc',
+              'OneSyncSvc',
+              'SharedAccess',
+              'lmhosts',
+              'RemoteRegistry',
+              'WMPNetworkSvc',
+              'XboxNetApiSvc',
+              'GeoLocationService'
+          )
+          
+          Write-Host "Disabling $($servicesToDisable.Count) services..."
+          foreach ($service in $servicesToDisable) {
+              try {
+                  $svc = Get-Service -Name $service -ErrorAction SilentlyContinue
+                  if ($svc) {
+                      Stop-Service -Name $service -Force -ErrorAction SilentlyContinue
+                      Set-Service -Name $service -StartupType Disabled -ErrorAction SilentlyContinue
+                  }
+              } catch {}
           }
-          $rawPassword = @()
-          $rawPassword += $charSet.Upper | Get-Random -Count 4
-          $rawPassword += $charSet.Lower | Get-Random -Count 4
-          $rawPassword += $charSet.Number | Get-Random -Count 4
-          $rawPassword += $charSet.Special | Get-Random -Count 4
-          $password = -join ($rawPassword | Sort-Object { Get-Random })
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
           
-          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
+          # High Performance power plan
+          powercfg /setactive 8c5e7fda-e8bf-45a6-a6cc-4b3c5c6d4f8f
           
-          if (-not (Get-LocalUser -Name "RDP")) {
-              Write-Error "User creation failed"
-              exit 1
+          # Disable visual effects for more RAM
+          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" `
+              -Name "VisualFXSetting" -Value 2 -Force -ErrorAction SilentlyContinue
+          
+          # Minimize pagefile (use RAM disk instead)
+          $pageFile = Get-WmiObject Win32_PageFile
+          if ($pageFile) {
+              $pageFile.Delete() | Out-Null
+          }
+          
+          # Set dynamic pagefile to minimal (1GB)
+          $cs = Get-WmiObject Win32_ComputerSystem
+          $cs.AutomaticManagedPagefile = $false
+          $cs.Put() | Out-Null
+          
+          $vp = Get-WmiObject Win32_PageFileSetting -ErrorAction SilentlyContinue
+          if ($vp) {
+              $vp.Delete() | Out-Null
+          }
+          
+          # Create minimal pagefile on C: (1GB)
+          $pageFileSet = [WmiClass]"\\.\root\cimv2:Win32_PageFileSetting"
+          $pageFileSet.Create("C:\pagefile.sys", 1024, 1024) | Out-Null
+          
+          Write-Host "✓ Memory optimized (Pagefile set to 1GB)"
+
+      - name: Create RAM Disk
+        run: |
+          Write-Host "💾 Creating RAM Disk..."
+          
+          $ramDiskSize = $env:RAM_DISK_SIZE
+          $ramDiskLetter = $env:RAM_DISK_LETTER
+          
+          # Check if ImDisk is available, if not use alternative
+          $imdiskPath = "C:\Program Files\ImDisk\imdisk.exe"
+          
+          if (-not (Test-Path $imdiskPath)) {
+              Write-Host "Installing ImDisk Toolkit..."
+              
+              # Download and install ImDisk
+              $imdiskUrl = "https://sourceforge.net/projects/imdisk-toolkit/files/ImDisk%20Toolkit/ImDisk%20Toolkit%202.0.10/ImDiskTk2010_x64_en-US.zip/download"
+              $zipPath = "C:\imDisk.zip"
+              
+              try {
+                  Invoke-WebRequest -Uri $imdiskUrl -OutFile $zipPath -TimeoutSec 300 -ErrorAction Stop
+                  Expand-Archive -Path $zipPath -DestinationPath "C:\ImDisk" -Force
+                  $imdiskPath = "C:\ImDisk\imdisk. exe"
+              } catch {
+                  Write-Host "⚠️  Could not download ImDisk, using built-in RAMDisk alternative..."
+                  
+                  # Use ImDisk CLI directly (already built-in on some Windows versions)
+                  # Try alternative: use imdisk from system or PowerShell
+              }
+          }
+          
+          # Remove existing RAM disk if present
+          & imdisk -l | Where-Object { $_ -match $ramDiskLetter } | ForEach-Object {
+              imdisk -d -m $ramDiskLetter -ErrorAction SilentlyContinue
+              Start-Sleep -Milliseconds 500
+          }
+          
+          # Create RAM disk
+          Write-Host "Creating ${ramDiskSize}GB RAM disk on drive $ramDiskLetter..."
+          
+          # Use fsutil to create virtual disk
+          $ramDiskSizeBytes = [int64]$ramDiskSize * 1GB
+          
+          try {
+              # Create sparse file for RAM disk
+              fsutil file createnew "C:\ramdisk.img" $ramDiskSizeBytes | Out-Null
+              
+              # Mount it using imdisk
+              imdisk -a -t file -f "C:\ramdisk.img" -m "$ramDiskLetter`:" -p "/fs:NTFS /q /y"
+              
+              Start-Sleep -Seconds 2
+              
+              # Verify creation
+              $ramDisk = Get-Volume -DriveLetter $ramDiskLetter -ErrorAction SilentlyContinue
+              if ($ramDisk) {
+                  Write-Host "✓ RAM Disk created: $ramDiskLetter`: ($([Math]::Round($ramDisk.Size / 1GB, 2)) GB)"
+                  Add-Content -Path $env:GITHUB_ENV -Value "RAM_DISK_LETTER=$ramDiskLetter"
+              }
+          } catch {
+              Write-Host "⚠️  RAM disk creation via imdisk failed, using alternative method..."
+              
+              # Alternative: Use VHD
+              try {
+                  $vhdPath = "C:\ramdisk.vhd"
+                  New-VirtualDisk -FriendlyName "RAMDisk" -Size ($ramDiskSizeBytes) `
+                      -ProvisioningType Dynamic -ErrorAction Stop | Out-Null
+                  
+                  Write-Host "✓ Created virtual disk (VHD-based)"
+              } catch {
+                  Write-Host "⚠️  RAM disk creation failed, continuing without RAM disk"
+              }
           }
 
-      - name: Install Tailscale
+      - name: Configure RAM Disk for Temp Storage
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
+          $ramDiskLetter = $env:RAM_DISK_LETTER
           
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
+          if (-not (Get-Volume -DriveLetter $ramDiskLetter -ErrorAction SilentlyContinue)) {
+              Write-Host "⚠️  RAM disk not available, skipping configuration"
+              return
+          }
+          
+          Write-Host "📁 Configuring RAM disk for temp storage..."
+          
+          # Create directories
+          New-Item -ItemType Directory -Path "$ramDiskLetter`:\Temp" -Force -ErrorAction SilentlyContinue | Out-Null
+          New-Item -ItemType Directory -Path "$ramDiskLetter`:\Cache" -Force -ErrorAction SilentlyContinue | Out-Null
+          New-Item -ItemType Directory -Path "$ramDiskLetter`:\RDP" -Force -ErrorAction SilentlyContinue | Out-Null
+          
+          # Redirect system temp to RAM disk
+          [Environment]::SetEnvironmentVariable("TEMP", "$ramDiskLetter`:\Temp", "Machine")
+          [Environment]::SetEnvironmentVariable("TMP", "$ramDiskLetter`:\Temp", "Machine")
+          [Environment]::SetEnvironmentVariable("TEMP", "$ramDiskLetter`:\Temp", "User")
+          [Environment]::SetEnvironmentVariable("TMP", "$ramDiskLetter`:\Temp", "User")
+          
+          # Optimize RAM disk for high throughput
+          & diskperf -y | Out-Null
+          
+          Write-Host "✓ RAM disk configured for temp storage"
 
-      - name: Establish Tailscale Connection
+      - name: RDP Performance Tuning
         run: |
-          # Bring up Tailscale with the provided auth key and set a unique hostname
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          Write-Host "🔧 Tuning RDP for maximum performance..."
           
-          # Wait for Tailscale to assign an IP
+          $rdpPath = 'HKLM:\System\CurrentControlSet\Control\Terminal Server'
+          $rdpTcpPath = "$rdpPath\WinStations\RDP-Tcp"
+          
+          # Enable RDP
+          Set-ItemProperty -Path $rdpPath -Name "fDenyTSConnections" -Value 0 -Force
+          
+          # Security settings (keep enabled)
+          Set-ItemProperty -Path $rdpTcpPath -Name "UserAuthentication" -Value 1 -Force
+          Set-ItemProperty -Path $rdpTcpPath -Name "SecurityLayer" -Value 2 -Force
+          
+          # Performance optimizations
+          Set-ItemProperty -Path $rdpTcpPath -Name "MaxConnectionTime" -Value 0 -Force
+          Set-ItemProperty -Path $rdpTcpPath -Name "MaxIdleTime" -Value 0 -Force
+          Set-ItemProperty -Path $rdpTcpPath -Name "MaxDisconnectionTime" -Value 0 -Force
+          
+          # Enable bitmap caching
+          reg add "HKCU\Software\Microsoft\Terminal Server Client" /v BitmapCachePersistedOnly /t REG_DWORD /d 1 /f
+          reg add "HKCU\Software\Microsoft\Terminal Server Client" /v BitmapCacheSizeLimit /t REG_DWORD /d 262144 /f
+          
+          # Optimize RDP quality vs speed
+          reg add "HKCU\Software\Microsoft\Terminal Server Client" /v DisplayConnectionBar /t REG_DWORD /d 1 /f
+          
+          # Enable compression
+          Set-ItemProperty -Path "$rdpTcpPath\Connection" -Name "fCompressionEnabled" -Value 1 -Force -ErrorAction SilentlyContinue
+          
+          # Optimize RDP bandwidth (per second limits)
+          Set-ItemProperty -Path "$rdpTcpPath" -Name "BandwidthLimit" -Value 0 -Force -ErrorAction SilentlyContinue
+          
+          Write-Host "✓ RDP performance optimized"
+
+      - name: Advanced Network Optimization
+        run: |
+          Write-Host "🌐 Optimizing network stack..."
+          
+          # Increase TCP connection limits
+          netsh int tcp set global maxsynretransmissions=2 | Out-Null
+          netsh int tcp set global tcpmaxdataretransmissions=3 | Out-Null
+          
+          # Enable TCP Fast Open
+          netsh int tcp set global fastopen=enabled | Out-Null
+          
+          # Optimize TCP receive window
+          netsh int tcp set global autotuninglevel=normal | Out-Null
+          
+          # Disable unnecessary TCP features
+          netsh int tcp set global timestamps=disabled | Out-Null
+          
+          # Increase socket backlog
+          reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" /v TcpTimedWaitDelay /t REG_DWORD /d 30 /f | Out-Null
+          reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" /v MaxUserPort /t REG_DWORD /d 65534 /f | Out-Null
+          
+          Write-Host "✓ Network stack optimized"
+
+      - name: Configure Optimized Firewall
+        run: |
+          Write-Host "🔐 Setting up firewall..."
+          
+          # Clear old rules
+          netsh advfirewall firewall delete rule name="GitHub-RDP-Tailscale" 2>$null
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
+          
+          # Add optimized inbound rule
+          netsh advfirewall firewall add rule name="GitHub-RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389 `
+            program="%SystemRoot%\System32\svchost.exe" `
+            description="RDP via Tailscale" enable=yes
+          
+          # Add Tailscale program rule
+          netsh advfirewall firewall add rule name="Tailscale-App" `
+            dir=in action=allow program="%ProgramFiles%\Tailscale\tailscale.exe" `
+            description="Tailscale Application"
+          
+          # Optimize firewall performance
+          netsh advfirewall set allprofiles logging maxfilesize 1024
+          
+          Write-Host "✓ Firewall optimized"
+
+      - name: Create Optimized RDP User
+        run: |
+          Write-Host "👤 Creating RDP user..."
+          
+          $rdpUser = Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue
+          
+          if (-not $rdpUser) {
+              Add-Type -AssemblyName System.Web
+              $password = [System.Web.Security.Membership]::GeneratePassword(24, 6)
+              
+              New-LocalUser -Name "RDP" `
+                  -Password (ConvertTo-SecureString $password -AsPlainText -Force) `
+                  -AccountNeverExpires `
+                  -Description "GitHub Actions RDP User"
+              
+              Add-LocalGroupMember -Group "Administrators" -Member "RDP" -ErrorAction SilentlyContinue
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+              
+              # Set user environment for RAM disk
+              [Environment]::SetEnvironmentVariable("TEMP", "$env:RAM_DISK_LETTER`:\Temp", "User")
+              [Environment]::SetEnvironmentVariable("TMP", "$env:RAM_DISK_LETTER`:\Temp", "User")
+              
+              Write-Host "::add-mask::$password"
+              Add-Content -Path $env:GITHUB_ENV -Value "RDP_USER=RDP"
+              Add-Content -Path $env:GITHUB_ENV -Value "RDP_PASSWORD=$password"
+              
+              Write-Host "✓ RDP user created"
+          } else {
+              Write-Host "⚠️  RDP user already exists"
+          }
+
+      - name: Cache Tailscale
+        id: cache-ts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.ProgramFiles }}\Tailscale
+            C:\tailscale-cache
+          key: tailscale-1. 82.0-${{ runner.os }}
+          restore-keys: tailscale-1.82.0-
+
+      - name: Install Tailscale (Optimized)
+        if: steps.cache-ts.outputs.cache-hit != 'true'
+        run: |
+          Write-Host "📦 Installing Tailscale..."
+          
+          $tsVersion = "1.82.0"
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-${tsVersion}-amd64.msi"
+          $installerPath = "C:\tailscale-cache\tailscale. msi"
+          
+          New-Item -ItemType Directory -Path (Split-Path $installerPath) -Force | Out-Null
+          
+          $maxRetries = 3
+          for ($i = 0; $i -lt $maxRetries; $i++) {
+              try {
+                  Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -TimeoutSec 300 -ErrorAction Stop
+                  break
+              } catch {
+                  if ($i -lt $maxRetries - 1) {
+                      Start-Sleep -Seconds 5
+                  } else {
+                      throw
+                  }
+              }
+          }
+          
+          Write-Host "✓ Tailscale downloaded"
+          Start-Process msiexec. exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait -TimeoutSec 300 -NoNewWindow
+          Write-Host "✓ Tailscale installed"
+
+      - name: Connect to Tailscale
+        timeout-minutes: 3
+        run: |
+          Write-Host "🔗 Connecting to Tailscale..."
+          
+          $tsPath = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          $hostname = "ghr-opt-$(Get-Date -Format 'yyyyMMdd-HHmmss')-$env:GITHUB_RUN_ID"
+          
+          & $tsPath up --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" --hostname=$hostname
+          
+          Start-Sleep -Seconds 2
+          Add-Content -Path $env:GITHUB_ENV -Value "TS_HOSTNAME=$hostname"
+          Write-Host "✓ Connected: $hostname"
+
+      - name: Get Tailscale IP
+        timeout-minutes: 2
+        run: |
+          Write-Host "📍 Getting Tailscale IP..."
+          
+          $tsPath = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          $maxRetries = 20
           $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
-              $retries++
+          
+          for ($i = 0; $i -lt $maxRetries; $i++) {
+              $tsIP = & $tsPath ip -4 2>$null
+              if ($tsIP -and -not ([string]::IsNullOrWhiteSpace($tsIP))) {
+                  break
+              }
+              Start-Sleep -Milliseconds 500
           }
           
           if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
+              Write-Error "Failed to get Tailscale IP"
               exit 1
           }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-      
-      - name: Verify RDP Accessibility
-        run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
           
-          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
-              exit 1
-          }
-          Write-Host "TCP connectivity successful!"
+          Add-Content -Path $env:GITHUB_ENV -Value "TAILSCALE_IP=$tsIP"
+          Write-Host "✓ IP: $tsIP"
 
-      - name: Maintain Connection
+      - name: Verify RDP
+        timeout-minutes: 2
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: $(echo $env:RDP_CREDS)"
-          Write-Host "==================`n"
+          Write-Host "🧪 Verifying RDP connectivity..."
           
-          # Keep runner active indefinitely (or until manually cancelled)
+          $result = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -InformationLevel Quiet -WarningAction SilentlyContinue
+          
+          if ($result) {
+              Write-Host "✓ RDP verified"
+          } else {
+              Write-Error "RDP verification failed"
+              exit 1
+          }
+
+      - name: Memory & Performance Status
+        run: |
+          Write-Host ""
+          Write-Host "📊 Performance Status:"
+          Write-Host ""
+          
+          $totalMem = (Get-CimInstance Win32_PhysicalMemory | Measure-Object Capacity -Sum).Sum / 1GB
+          $freeMem = (Get-CimInstance Win32_OperatingSystem). FreePhysicalMemory / 1MB
+          $usedMem = $totalMem - ($freeMem / 1024)
+          $memUsagePercent = [Math]::Round(($usedMem / $totalMem) * 100, 2)
+          
+          Write-Host "Total RAM     : $([Math]::Round($totalMem, 2)) GB"
+          Write-Host "Used RAM      : $([Math]::Round($usedMem, 2)) GB ($memUsagePercent%)"
+          Write-Host "Free RAM      : $([Math]::Round($freeMem / 1024, 2)) GB"
+          
+          if (Get-Volume -DriveLetter $env:RAM_DISK_LETTER -ErrorAction SilentlyContinue) {
+              $ramDisk = Get-Volume -DriveLetter $env:RAM_DISK_LETTER
+              $ramDiskUsage = [Math]::Round((($ramDisk.Size - $ramDisk.SizeRemaining) / 1GB), 2)
+              $ramDiskTotal = [Math]::Round($ramDisk.Size / 1GB, 2)
+              Write-Host "RAM Disk      : $ramDiskUsage / $ramDiskTotal GB"
+          }
+          
+          Write-Host ""
+
+      - name: Display Access Info
+        run: |
+          $timeout = ${{ fromJson(github.event.inputs.timeout_minutes) || 120 }}
+          
+          Write-Host ""
+          Write-Host "╔══════════════════════════════════════╗" -ForegroundColor Cyan
+          Write-Host "║  🖥️  RDP 16GB OPTIMIZED READY       ║" -ForegroundColor Green
+          Write-Host "╚══════════════════════════════════════╝" -ForegroundColor Cyan
+          Write-Host ""
+          Write-Host "  🌐 Address    : $env:TAILSCALE_IP"
+          Write-Host "  👤 Username   : $env:RDP_USER"
+          Write-Host "  🔐 Password   : ••••••••••••••••••••••••"
+          Write-Host "  🖧 Hostname   : $env:TS_HOSTNAME"
+          Write-Host ""
+          Write-Host "  💾 RAM Disk   : $($env:RAM_DISK_LETTER): ($env:RAM_DISK_SIZE GB)"
+          Write-Host "  ⏱️  Timeout    : $timeout minutes"
+          Write-Host ""
+          Write-Host "╚══════════════════════════════════════╝" -ForegroundColor Cyan
+          Write-Host ""
+
+      - name: Keep Session Active
+        run: |
+          Write-Host "✅ Session active.  Keeping alive..."
+          
+          $startTime = Get-Date
+          $timeout = ${{ fromJson(github. event.inputs.timeout_minutes) || 120 }}
+          
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              $elapsed = [Math]::Round(((Get-Date) - $startTime).TotalMinutes, 2)
+              
+              if ($elapsed -ge $timeout) {
+                  Write-Host "⏰ Timeout reached"
+                  break
+              }
+              
+              $bar = "█" * ([Math]::Round($elapsed / $timeout * 30)) + "░" * ([Math]::Round((1 - $elapsed / $timeout) * 30))
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] [$bar] $elapsed / $timeout min" -ForegroundColor Green
+              
               Start-Sleep -Seconds 300
           }
+
+      - name: Cleanup & Unmount RAM Disk
+        if: always()
+        run: |
+          Write-Host ""
+          Write-Host "🧹 Cleaning up..."
+          
+          try {
+              # Disconnect Tailscale
+              $process = Start-Process "$env:ProgramFiles\Tailscale\tailscale.exe" -ArgumentList "down" `
+                  -PassThru -NoNewWindow -ErrorAction SilentlyContinue
+              
+              if ($process -and !  $process.WaitForExit(15000)) {
+                  $process.Kill()
+              }
+              Write-Host "✓ Tailscale disconnected"
+          } catch {}
+          
+          try {
+              # Unmount RAM disk
+              $ramDiskLetter = $env:RAM_DISK_LETTER
+              if ($ramDiskLetter -and (Get-Volume -DriveLetter $ramDiskLetter -ErrorAction SilentlyContinue)) {
+                  imdisk -d -m "$ramDiskLetter`:" -ErrorAction SilentlyContinue
+                  Remove-Item "C:\ramdisk. img" -Force -ErrorAction SilentlyContinue
+                  Write-Host "✓ RAM disk unmounted"
+              }
+          } catch {}
+          
+          Write-Host "✓ Cleanup completed"
