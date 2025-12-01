@@ -69,13 +69,6 @@ jobs:
           if (-not $tsIP) { exit 1 }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      # 4. Cài Android Studio + SDK
-      - name: Install JDK 17
-        run: choco install -y openjdk17
-
-      - name: Install Android Studio
-        run: choco install -y androidstudio
-
 
       # 5. Tối ưu hiệu năng RDP
       - name: Enable High Performance Power Plan
