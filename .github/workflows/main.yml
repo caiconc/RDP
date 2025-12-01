@@ -116,21 +116,7 @@ jobs:
         run: |
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v DwmFrameRate /t REG_DWORD /d 120 /f
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v EnableDwm /t REG_DWORD /d 1 /f
-
-      - name: Apply BetterRDP registry tweaks (community bundle)
-        run: |
-          # Example: import a curated .reg file containing additional safe tweaks.
-          # Replace URL with a vetted source you trust before running in production.
-          $regUrl = "https://raw.githubusercontent.com/Upinel/BetterRDP/main/UpinelBetterRDP.reg"
-          $regPath = "$env:TEMP\UpinelBetterRDP.reg"
-          try {
-            Invoke-WebRequest -Uri $regUrl -OutFile $regPath -UseBasicParsing -ErrorAction Stop
-            reg import $regPath
-            Remove-Item $regPath -Force
-            Write-Host "Imported BetterRDP registry bundle"
-          } catch {
-            Write-Host "Could not import BetterRDP bundle: $ 
-            
+          
       - name: Optimize Network for Low Latency RDP (idempotent)
         run: |
           reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v fEnableUDP /t REG_DWORD /d 1 /f
