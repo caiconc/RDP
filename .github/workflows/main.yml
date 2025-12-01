@@ -78,6 +78,9 @@ jobs:
           reg add "HKCU\Software\Microsoft\Terminal Server Client" /v DisableMenuAnimations /t REG_DWORD /d 1 /f
           reg add "HKCU\Software\Microsoft\Terminal Server Client" /v DisableThemes /t REG_DWORD /d 1 /f
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v fEnableCompression /t REG_DWORD /d 1 /f
+          # Improve color depth and caching for smoother visuals
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v ColorDepth /t REG_DWORD /d 32 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v BitmapCacheSize /t REG_DWORD /d 32 /f
 
       - name: Disable Unnecessary Services
         run: |
@@ -97,26 +100,87 @@ jobs:
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v AudioCompression /t REG_DWORD /d 1 /f
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v VideoCompression /t REG_DWORD /d 1 /f
 
-
       - name: Optimize CPU Scheduling for Foreground Apps
         run: |
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\PriorityControl" /v Win32PrioritySeparation /t REG_DWORD /d 38 /f
 
       - name: Enable GPU Acceleration for RDP
         run: |
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v EnableRemoteFX /t REG_DWORD /d 1 /f
+          # Enable hardware acceleration flags used by RDP/H.264 pipeline
+          reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\RemoteDesktop" /v UseHardwareEncoding /t REG_DWORD /d 1 /f
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v EnableHardwareAcceleration /t REG_DWORD /d 1 /f
+          # Ensure DWM is enabled for composition and GPU rendering
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v EnableDwm /t REG_DWORD /d 1 /f
 
       - name: Enable High Frame Rate for RDP up to 120fps
         run: |
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v DwmFrameRate /t REG_DWORD /d 120 /f
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v EnableDwm /t REG_DWORD /d 1 /f
 
-      - name: Optimize Network for Low Latency RDP
+      - name: Apply BetterRDP registry tweaks (community bundle)
+        run: |
+          # Example: import a curated .reg file containing additional safe tweaks.
+          # Replace URL with a vetted source you trust before running in production.
+          $regUrl = "https://raw.githubusercontent.com/Upinel/BetterRDP/main/UpinelBetterRDP.reg"
+          $regPath = "$env:TEMP\UpinelBetterRDP.reg"
+          try {
+            Invoke-WebRequest -Uri $regUrl -OutFile $regPath -UseBasicParsing -ErrorAction Stop
+            reg import $regPath
+            Remove-Item $regPath -Force
+            Write-Host "Imported BetterRDP registry bundle"
+          } catch {
+            Write-Host "Could not import BetterRDP bundle: $_"
+          }
+
+      - name: Harden and Optimize RDP Network and QoS
+        run: |
+          # 1) Giới hạn firewall chỉ cho Tailscale subnet (100.64.0.0/10)
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" || Write-Host "No existing rule"
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389 remoteip=100.64.0.0/10 profile=any
+
+          # 2) Cho phép UDP cho RDP và bật UDP transport policy
+          reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v fEnableUDP /t REG_DWORD /d 1 /f
+          reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v fClientDisableUDP /t REG_DWORD /d 0 /f
+
+          # 3) Tăng mức mã hóa RDP (High)
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v MinEncryptionLevel /t REG_DWORD /d 3 /f
+
+          # 4) Tạo QoS policy ưu tiên gói cho cổng 3389 (nếu NetQosPolicy có sẵn)
+          if (Get-Command New-NetQosPolicy -ErrorAction SilentlyContinue) {
+            if (Get-NetQosPolicy -Name "RDP-QoS" -ErrorAction SilentlyContinue) {
+              Remove-NetQosPolicy -Name "RDP-QoS" -Confirm:$false
+            }
+            New-NetQosPolicy -Name "RDP-QoS" -AppPathNameMatchCondition "svchost.exe" -IPProtocolMatchCondition TCP -DestinationPortMatchCondition 3389 -NetworkProfile All -PriorityValue8021Action 5
+          } else {
+            Write-Host "NetQosPolicy cmdlets not available on this runner"
+          }
+
+          # 5) Tăng ưu tiên tiến trình chứa dịch vụ RDP để giảm lag khi CPU cao
+          $pid = (Get-NetTCPConnection -LocalPort 3389 -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess
+          if ($pid) {
+            try {
+              $proc = Get-Process -Id $pid -ErrorAction Stop
+              $proc.PriorityClass = 'High'
+              Write-Host "Set RDP host process (PID $pid) priority to High"
+            } catch {
+              Write-Host "Could not set process priority: $_"
+            }
+          } else {
+            Write-Host "RDP host process PID not found"
+          }
+
+          # 6) Tối ưu TCP stack cho throughput/latency
+          reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" /v EnableTCPA /t REG_DWORD /d 1 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" /v Tcp1323Opts /t REG_DWORD /d 1 /f
+
+          # 7) Khởi động lại dịch vụ RDP để áp dụng một số thay đổi
+          Restart-Service -Name TermService -Force -ErrorAction SilentlyContinue
+          Write-Host "RDP network and QoS configuration applied"
+
+      - name: Optimize Network for Low Latency RDP (idempotent)
         run: |
           reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v fEnableUDP /t REG_DWORD /d 1 /f
           reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v fClientDisableUDP /t REG_DWORD /d 0 /f
-          # Enable QoS Packet Scheduler priority for RDP (if available)
           reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" /v EnableTCPA /t REG_DWORD /d 1 /f
 
       - name: Verify RDP Accessibility
@@ -129,6 +193,18 @@ jobs:
           }
           Write-Host "TCP connectivity successful!"
 
+      - name: Check GPU availability and drivers (informational)
+        run: |
+          Write-Host "Checking GPU presence and driver info..."
+          try {
+            $gpus = Get-WmiObject Win32_VideoController -ErrorAction Stop
+            foreach ($g in $gpus) {
+              Write-Host "Name: $($g.Name) | DriverVersion: $($g.DriverVersion) | Status: $($g.Status)"
+            }
+          } catch {
+            Write-Host "Could not enumerate GPUs: $_"
+          }
+
       - name: Maintain Connection
         run: |
           Write-Host "`n=== RDP ACCESS ==="
@@ -138,5 +214,5 @@ jobs:
           Write-Host "==================`n"
           while ($true) {
               Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
-              Start-Sleep -Seconds 200
+              Start-Sleep -Seconds 300
           }
