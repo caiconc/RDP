@@ -9,7 +9,6 @@ jobs:
     timeout-minutes: 3600
 
     steps:
-      # 1. Cấu hình RDP
       - name: Configure Core RDP Settings
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
@@ -19,7 +18,6 @@ jobs:
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
-      # 2. Tạo user RDP
       - name: Create RDP User with Secure Password
         run: |
           Add-Type -AssemblyName System.Security
@@ -36,12 +34,16 @@ jobs:
           $rawPassword += $charSet.Special | Get-Random -Count 4
           $password = -join ($rawPassword | Sort-Object { Get-Random })
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          } else {
+            Set-LocalUser -Name "RDP" -Password $securePass
+          }
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          # Nếu cần quyền admin, giữ dòng dưới; nếu không muốn admin, comment/remove dòng này
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
 
-      # 3. Cài Tailscale
       - name: Install Tailscale
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
@@ -55,82 +57,90 @@ jobs:
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
           $tsIP = $null
           $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+          while (-not $tsIP -and $retries -lt 20) {
+              $tsIP = (& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4) -join ''
               Start-Sleep -Seconds 5
               $retries++
           }
-          if (-not $tsIP) { exit 1 }
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
+          }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      # 4. Tối ưu hiệu năng RDP
       - name: Enable High Performance Power Plan
         run: powercfg -setactive SCHEME_MIN
 
-      - name: Optimize RDP Performance
+      - name: Optimize RDP Visuals and UX
         run: |
           reg add "HKCU\Software\Microsoft\Terminal Server Client" /v DisableWallpaper /t REG_DWORD /d 1 /f
           reg add "HKCU\Software\Microsoft\Terminal Server Client" /v DisableFullWindowDrag /t REG_DWORD /d 1 /f
           reg add "HKCU\Software\Microsoft\Terminal Server Client" /v DisableMenuAnimations /t REG_DWORD /d 1 /f
           reg add "HKCU\Software\Microsoft\Terminal Server Client" /v DisableThemes /t REG_DWORD /d 1 /f
-
-      - name: Boost RDP Network Performance
-        run: |
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v fEnableCompression /t REG_DWORD /d 1 /f
 
       - name: Disable Unnecessary Services
         run: |
-          Stop-Service -Name SysMain -Force
-          Set-Service -Name SysMain -StartupType Disabled
-          Stop-Service -Name DiagTrack -Force
-          Set-Service -Name DiagTrack -StartupType Disabled
+          if (Get-Service -Name SysMain -ErrorAction SilentlyContinue) {
+            Stop-Service -Name SysMain -Force
+            Set-Service -Name SysMain -StartupType Disabled
+          }
+          if (Get-Service -Name DiagTrack -ErrorAction SilentlyContinue) {
+            Stop-Service -Name DiagTrack -Force
+            Set-Service -Name DiagTrack -StartupType Disabled
+          }
 
-      # 5. Multimedia (Âm thanh + Video)
-      - name: Enable RDP Audio Redirection
-        run: reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v fEnableAudioRedirection /t REG_DWORD /d 1 /f
-
-      - name: Enable RDP Video Redirection
-        run: reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v fEnableVideoRedirection /t REG_DWORD /d 1 /f
-
-      - name: Optimize RDP Multimedia
+      - name: Enable RDP Audio and Video Redirection
         run: |
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v fEnableAudioRedirection /t REG_DWORD /d 1 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v fEnableVideoRedirection /t REG_DWORD /d 1 /f
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v AudioCompression /t REG_DWORD /d 1 /f
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v VideoCompression /t REG_DWORD /d 1 /f
 
+      - name: Increase Virtual Memory Pagefile to 64GB
+        run: |
+          wmic computersystem where name="%computername%" set AutomaticManagedPagefile=False
+          # Set pagefile initial 32GB, max 64GB
+          wmic pagefileset where name="C:\\pagefile.sys" set InitialSize=32768,MaximumSize=65536
 
-      # 7. CPU tối ưu
-      - name: Optimize CPU Scheduling
+      - name: Optimize CPU Scheduling for Foreground Apps
         run: |
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\PriorityControl" /v Win32PrioritySeparation /t REG_DWORD /d 38 /f
 
-      # 8. Remote 120fps + GPU tăng tốc
-      - name: Enable RDP High Frame Rate (120fps)
-        run: |
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v DwmFrameRate /t REG_DWORD /d 120 /f
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v EnableDwm /t REG_DWORD /d 1 /f
-
-      - name: Enable RemoteFX and DirectX GPU Acceleration
+      - name: Enable GPU Acceleration for RDP
         run: |
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v EnableRemoteFX /t REG_DWORD /d 1 /f
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v EnableHardwareAcceleration /t REG_DWORD /d 1 /f
 
-      # 9. Network tối ưu cho RDP
-      - name: Optimize Network for RDP
+      - name: Enable High Frame Rate for RDP up to 120fps
+        run: |
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v DwmFrameRate /t REG_DWORD /d 120 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v EnableDwm /t REG_DWORD /d 1 /f
+
+      - name: Optimize Network for Low Latency RDP
         run: |
           reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v fEnableUDP /t REG_DWORD /d 1 /f
           reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v fClientDisableUDP /t REG_DWORD /d 0 /f
+          # Enable QoS Packet Scheduler priority for RDP (if available)
+          reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" /v EnableTCPA /t REG_DWORD /d 1 /f
 
+      - name: Verify RDP Accessibility
+        run: |
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
+          }
+          Write-Host "TCP connectivity successful!"
 
-      # 10. Giữ kết nối
-     - name: Maintain Connection
+      - name: Maintain Connection
         run: |
           Write-Host "`n=== RDP ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
           Write-Host "Username: RDP"
           Write-Host "Password: $(echo $env:RDP_CREDS)"
           Write-Host "==================`n"
-          
-          # Keep runner active indefinitely (or until manually cancelled)
           while ($true) {
               Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
               Start-Sleep -Seconds 300
