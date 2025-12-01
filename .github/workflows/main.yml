@@ -97,11 +97,6 @@ jobs:
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v AudioCompression /t REG_DWORD /d 1 /f
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v VideoCompression /t REG_DWORD /d 1 /f
 
-      # 6. Tăng RAM ảo
-      - name: Increase Virtual Memory (Pagefile)
-        run: |
-          wmic computersystem where name="%computername%" set AutomaticManagedPagefile=False
-          wmic pagefileset where name="C:\\pagefile.sys" set InitialSize=16384,MaximumSize=32768
 
       # 7. Remote 60fps + GPU tăng tốc
       - name: Enable RDP High Frame Rate (60fps)
