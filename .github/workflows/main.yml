@@ -97,11 +97,6 @@ jobs:
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v AudioCompression /t REG_DWORD /d 1 /f
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v VideoCompression /t REG_DWORD /d 1 /f
 
-      # 6. RAM ảo mạnh hơn
-      - name: Increase Virtual Memory (Pagefile to 64GB)
-        run: |
-          wmic computersystem where name="%computername%" set AutomaticManagedPagefile=False
-          wmic pagefileset where name="C:\\pagefile.sys" set InitialSize=32768,MaximumSize=65536
 
       # 7. CPU tối ưu
       - name: Optimize CPU Scheduling
