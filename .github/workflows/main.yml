@@ -140,17 +140,7 @@ jobs:
           reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v fClientDisableUDP /t REG_DWORD /d 0 /f
 
           # 3) Tăng mức mã hóa RDP (High)
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v MinEncryptionLevel /t REG_DWORD /d 3 /f
-
-          # 4) Tạo QoS policy ưu tiên gói cho cổng 3389 (nếu NetQosPolicy có sẵn)
-          if (Get-Command New-NetQosPolicy -ErrorAction SilentlyContinue) {
-            if (Get-NetQosPolicy -Name "RDP-QoS" -ErrorAction SilentlyContinue) {
-              Remove-NetQosPolicy -Name "RDP-QoS" -Confirm:$false
-            }
-            New-NetQosPolicy -Name "RDP-QoS" -AppPathNameMatchCondition "svchost.exe" -IPProtocolMatchCondition TCP -DestinationPortMatchCondition 3389 -NetworkProfile All -PriorityValue8021Action 5
-          } else {
-            Write-Host "NetQosPolicy cmdlets not available on this runner"
-          }
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v MinEncryptionLevel /t REG_DWORD /d 3 /l
 
           # 5) Tăng ưu tiên tiến trình chứa dịch vụ RDP để giảm lag khi CPU cao
           $pid = (Get-NetTCPConnection -LocalPort 3389 -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess
