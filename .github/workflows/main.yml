@@ -1,190 +1,78 @@
-name: Self-hosted Windows Android Studio + RDP (Tailscale)
+name: Android-RDP-Test
 
 on:
   workflow_dispatch:
 
 jobs:
   android-rdp:
-    name: Android Studio + RDP via Tailscale
-    runs-on: [self-hosted, windows, android]
-    timeout-minutes: 360
-    env:
-      ANDROID_SDK_ROOT: C:\Android\sdk
-      CRED_FILE: C:\secure\rdp_credentials.txt
-      TAILSCALE_MSI_URL: https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi
+    runs-on: windows-latest
+    timeout-minutes: 3600
 
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Ensure Chocolatey present
-        shell: powershell
-        run: |
-          if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
-            Set-ExecutionPolicy Bypass -Scope Process -Force
-            iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-          }
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: gradle
 
-      - name: Install Android Studio and OpenJDK (if missing)
-        shell: powershell
-        run: |
-          if (-not (Get-Command "studio64.exe" -ErrorAction SilentlyContinue)) {
-            choco install -y androidstudio openjdk11
-          } else {
-            Write-Host "Android Studio appears installed"
-          }
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK commandline tools and packages
-        shell: powershell
-        run: |
-          $sdkRoot = "${{ env.ANDROID_SDK_ROOT }}"
-          if (-not (Test-Path $sdkRoot)) { New-Item -ItemType Directory -Path $sdkRoot -Force | Out-Null }
-          $cmdlineZip = "$env:TEMP\cmdline-tools.zip"
-          $cmdlineUrl = "https://dl.google.com/android/repository/commandlinetools-win-9477386_latest.zip"
-          Invoke-WebRequest -Uri $cmdlineUrl -OutFile $cmdlineZip
-          Expand-Archive -Path $cmdlineZip -DestinationPath "$sdkRoot\cmdline-tools" -Force
-          if (-not (Test-Path "$sdkRoot\cmdline-tools\latest")) {
-            New-Item -ItemType Directory -Path "$sdkRoot\cmdline-tools\latest" -Force | Out-Null
-            Get-ChildItem "$sdkRoot\cmdline-tools" -Directory | Where-Object { $_.Name -ne "latest" } | ForEach-Object {
-              Copy-Item -Path $_.FullName\* -Destination "$sdkRoot\cmdline-tools\latest" -Recurse -Force
-            }
-          }
-          $env:Path += ";$sdkRoot\platform-tools;$sdkRoot\emulator;$sdkRoot\cmdline-tools\latest\bin"
-          & sdkmanager --sdk_root=$sdkRoot "platform-tools" "platforms;android-33" "emulator" "system-images;android-33;google_apis;x86_64" --licenses
+      - name: Build Project
+        run: ./gradlew build
 
-      - name: Install Tailscale MSI
-        shell: powershell
+      # --- RDP cấu hình ---
+      - name: Enable RDP
         run: |
-          $msi = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $env:TAILSCALE_MSI_URL -OutFile $msi
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$msi`"", "/quiet", "/norestart" -Wait
-          Remove-Item $msi -Force
+          Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Restart-Service -Name TermService
 
-      - name: Bring up Tailscale (requires secret)
-        id: tailscale_up
-        shell: powershell
-        env:
-          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+      - name: Create RDP User
         run: |
-          if (-not $env:TAILSCALE_AUTHKEY) { Write-Error "TAILSCALE_AUTHKEY not set"; exit 1 }
-          $exePaths = @("C:\Program Files\Tailscale IPN\tailscale.exe","C:\Program Files\Tailscale\tailscale.exe")
-          $tailscaleExe = $exePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if (-not $tailscaleExe) { Write-Error "tailscale.exe not found"; exit 1 }
-          & $tailscaleExe up --authkey $env:TAILSCALE_AUTHKEY --hostname "gh-win-${{ github.run_id }}" --accept-routes --accept-dns
-          Start-Sleep -Seconds 6
-          $tsIP = (& $tailscaleExe ip -4 2>$null) -join ","
-          if (-not $tsIP) { Write-Error "Tailscale IP not assigned"; exit 1 }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-          echo "TAILSCALE_EXE=$tailscaleExe" >> $env:GITHUB_ENV
-
-      - name: Configure RDP and firewall
-        shell: powershell
-        run: |
-          # Enable RDP
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          # Add firewall rule for RDP (Tailscale secures network)
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389 description="Allow RDP for Tailscale access"
-          Restart-Service -Name TermService -Force
-
-      - name: Create RDP user and save credentials securely
-        id: create_rdp
-        shell: powershell
-        run: |
-          $username = "rdpuser"
-          $chars = ('a'..'z') + ('A'..'Z') + ('0'..'9') + ('!','@','#','$','%','^','&','*','-','_')
-          $password = -join (1..16 | ForEach-Object { $chars | Get-Random })
+          $password = [System.Web.Security.Membership]::GeneratePassword(16,3)
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-
-          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
-            Set-LocalUser -Name $username -Password $securePass
-          } else {
-            New-LocalUser -Name $username -Password $securePass -FullName "RDP User" -Description "RDP user for CI" -PasswordNeverExpires:$false
-            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+              Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
           }
+          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
 
-          # Mask password in logs
-          Write-Host "::add-mask::$password"
-
-          # Save credentials to secure file with restricted ACL
-          $credFile = "${{ env.CRED_FILE }}"
-          $credDir = Split-Path $credFile -Parent
-          if (-not (Test-Path $credDir)) { New-Item -ItemType Directory -Path $credDir -Force | Out-Null }
-          $content = @"
-TailscaleIP=$env:TAILSCALE_IP
-RDP_Host=$env:TAILSCALE_IP
-RDP_Port=3389
-Username=$username
-Password=$password
-GeneratedAt=$(Get-Date -Format o)
-"@
-          $content | Out-File -FilePath $credFile -Encoding UTF8 -Force
-
-          # Set ACL: Administrators FullControl, rdpuser Read
-          $acl = Get-Acl $credFile
-          $acl.SetAccessRuleProtection($true, $false)
-          $acl.Access | ForEach-Object { $acl.RemoveAccessRule($_) }
-          $admin = New-Object System.Security.Principal.NTAccount("BUILTIN","Administrators")
-          $ruleAdmin = New-Object System.Security.AccessControl.FileSystemAccessRule($admin, "FullControl", "Allow")
-          $userAccount = New-Object System.Security.Principal.NTAccount($env:COMPUTERNAME, $username)
-          $ruleUser = New-Object System.Security.AccessControl.FileSystemAccessRule($userAccount, "Read", "Allow")
-          $acl.AddAccessRule($ruleAdmin)
-          $acl.AddAccessRule($ruleUser)
-          Set-Acl -Path $credFile -AclObject $acl
-
-          echo "cred_file=$credFile" >> $env:GITHUB_ENV
-          echo "rdp_user=$username" >> $env:GITHUB_ENV
-
-      - name: Start Android Studio (GUI) and keep session
-        shell: powershell
+      - name: Install Tailscale
         run: |
-          # Start Android Studio if not running. This opens GUI on the runner's desktop session.
-          $studio = "C:\Program Files\Android\Android Studio\bin\studio64.exe"
-          if (-not (Test-Path $studio)) {
-            # fallback to common path
-            $studio = (Get-ChildItem "C:\Program Files" -Recurse -Filter "studio64.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $path = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $url -OutFile $path
+          Start-Process msiexec.exe -ArgumentList "/i `"$path`" /quiet /norestart" -Wait
+          Remove-Item $path -Force
+
+      - name: Connect Tailscale
+        run: |
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=android-runner-$env:GITHUB_RUN_ID
+          $tsIP = $null
+          for ($i=0; $i -lt 10; $i++) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              if ($tsIP) { break }
+              Start-Sleep -Seconds 5
           }
-          if (-not $studio) { Write-Error "Android Studio executable not found"; exit 1 }
-          Start-Process -FilePath $studio -ArgumentList "" -WindowStyle Normal
-          Start-Sleep -Seconds 8
-          # Optionally start emulator in background (headless window)
-          if (Test-Path "${{ env.ANDROID_SDK_ROOT }}\emulator\emulator.exe") {
-            Start-Process -FilePath "${{ env.ANDROID_SDK_ROOT }}\emulator\emulator.exe" -ArgumentList "-avd ci_avd -gpu host -no-snapshot -no-boot-anim" -NoNewWindow
-          }
+          if (-not $tsIP) { throw "No Tailscale IP" }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      - name: Show connection instructions (no password printed)
-        shell: powershell
+      - name: Show Remote Info
         run: |
-          Write-Host "=== RDP ACCESS INFO ==="
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          Write-Host "RDP user: $env:rdp_user"
-          Write-Host "Credentials file on runner: $env:cred_file"
-          Write-Host "Use Tailscale app on iPhone to join the same tailnet, then open RDP client to $env:TAILSCALE_IP:3389"
-          Write-Host "========================"
+          Write-Host "`n=== REMOTE ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host $env:RDP_CREDS
+          Write-Host "=====================`n"
 
-      - name: Keep runner active for remote session
-        shell: powershell
+      - name: Keep Alive
         run: |
-          Write-Host "Runner will keep Android Studio and RDP available until this workflow is cancelled or times out."
           while ($true) {
-            Start-Sleep -Seconds 300
-            Write-Host "[$(Get-Date -Format o)] RDP active via Tailscale ($env:TAILSCALE_IP)"
-          }
-
-      - name: Cleanup (always)
-        if: always()
-        shell: powershell
-        run: |
-          # Stop emulator if running
-          if (Test-Path "${{ env.ANDROID_SDK_ROOT }}\platform-tools\adb.exe") {
-            & "${{ env.ANDROID_SDK_ROOT }}\platform-tools\adb.exe" -s emulator-5554 emu kill 2>$null || Write-Host "No emulator to stop"
-          }
-          # Stop Tailscale and remove credentials file
-          if ($env:TAILSCALE_EXE) {
-            & $env:TAILSCALE_EXE down || Write-Host "tailscale down attempted"
-            & $env:TAILSCALE_EXE logout || Write-Host "tailscale logout attempted"
-          }
-          if (Test-Path $env:cred_file) {
-            Remove-Item $env:cred_file -Force -ErrorAction SilentlyContinue
-            Write-Host "Removed credential file"
+              Write-Host "[$(Get-Date)] Runner active"
+              Start-Sleep -Seconds 300
           }
