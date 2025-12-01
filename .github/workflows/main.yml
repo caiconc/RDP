@@ -9,19 +9,14 @@ jobs:
     timeout-minutes: 3600
 
     steps:
-      # 1. Cấu hình RDP cơ bản
+      # 1. Cấu hình RDP
       - name: Configure Core RDP Settings
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
-
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
-
           Restart-Service -Name TermService -Force
 
       # 2. Tạo user RDP
@@ -32,8 +27,7 @@ jobs:
               Upper   = [char[]](65..90)
               Lower   = [char[]](97..122)
               Number  = [char[]](48..57)
-              Special = ([char[]](33..47) + [char[]](58..64) +
-                         [char[]](91..96) + [char[]](123..126))
+              Special = ([char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126))
           }
           $rawPassword = @()
           $rawPassword += $charSet.Upper | Get-Random -Count 4
@@ -69,8 +63,7 @@ jobs:
           if (-not $tsIP) { exit 1 }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-
-      # 5. Tối ưu hiệu năng RDP
+      # 4. Tối ưu hiệu năng RDP
       - name: Enable High Performance Power Plan
         run: powercfg -setactive SCHEME_MIN
 
@@ -92,7 +85,7 @@ jobs:
           Stop-Service -Name DiagTrack -Force
           Set-Service -Name DiagTrack -StartupType Disabled
 
-      # 6. Multimedia (Âm thanh + Video)
+      # 5. Multimedia (Âm thanh + Video)
       - name: Enable RDP Audio Redirection
         run: reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v fEnableAudioRedirection /t REG_DWORD /d 1 /f
 
@@ -104,7 +97,23 @@ jobs:
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v AudioCompression /t REG_DWORD /d 1 /f
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v VideoCompression /t REG_DWORD /d 1 /f
 
-      # 7. Giữ kết nối
+      # 6. Tăng RAM ảo
+      - name: Increase Virtual Memory (Pagefile)
+        run: |
+          wmic computersystem where name="%computername%" set AutomaticManagedPagefile=False
+          wmic pagefileset where name="C:\\pagefile.sys" set InitialSize=16384,MaximumSize=32768
+
+      # 7. Remote 60fps + GPU tăng tốc
+      - name: Enable RDP High Frame Rate (60fps)
+        run: |
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v DwmFrameRate /t REG_DWORD /d 60 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v EnableDwm /t REG_DWORD /d 1 /f
+
+      - name: Enable RemoteFX GPU Acceleration
+        run: |
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v EnableRemoteFX /t REG_DWORD /d 1 /f
+
+      # 8. Giữ kết nối
       - name: Maintain Connection
         run: |
           Write-Host "`n=== RDP ACCESS ==="
