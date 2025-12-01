@@ -134,9 +134,6 @@ jobs:
 
       - name: Harden and Optimize RDP Network and QoS
         run: |
-          # 1) Giới hạn firewall chỉ cho Tailscale subnet (100.64.0.0/10)
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" || Write-Host "No existing rule"
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389 remoteip=100.64.0.0/10 profile=any
 
           # 2) Cho phép UDP cho RDP và bật UDP transport policy
           reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v fEnableUDP /t REG_DWORD /d 1 /f
