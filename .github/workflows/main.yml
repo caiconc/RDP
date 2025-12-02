@@ -1,137 +1,77 @@
-name: RDP Ultimate (Win32-Virtual64-Remote64)
+name: AnyDesk Only (No Tailscale)
 
 on:
   workflow_dispatch:
 
 jobs:
-  high-perf-rdp:
+  anydesk-remote:
     runs-on: windows-latest
     timeout-minutes: 360
     
     steps:
-      # 1. Cấu hình cơ bản & Firewall
-      - name: Configure Core RDP & Firewall
-        run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-          
-          # Firewall: Chỉ cho phép Tailscale Subnet
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389 remoteip=100.64.0.0/10 profile=any
-          
-          Restart-Service -Name TermService -Force
-
-      # 2. INSTALL TAILSCALE (LINK CỐ ĐỊNH 1.82.0 - FIX LỖI 404)
-      - name: Install & Connect Tailscale
-        run: |
-          # Dùng Link phiên bản cố định 1.82.0 (amd64)
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          
-          Write-Host "Downloading Tailscale v1.82.0..."
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-
-          # Cài đặt Silent
-          Write-Host "Installing Tailscale..."
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
-
-          # Đợi service chạy ổn định
-          Write-Host "Waiting for service..."
-          Start-Sleep -Seconds 10
-
-          # Authenticate (Quan trọng: --unattended để chạy headless)
-          Write-Host "Connecting to Tailscale..."
-          $tsBin = "$env:ProgramFiles\Tailscale\tailscale.exe"
-          
-          & $tsBin up `
-            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
-            --hostname="gh-runner-$env:GITHUB_RUN_ID" `
-            --unattended `
-            --reset `
-            --force-reauth `
-            --accept-routes
-
-          # Lấy IP và xuất ra biến môi trường
-          $tsIP = $null
-          $i = 0
-          while (-not $tsIP -and $i -lt 20) {
-            $tsIP = (& $tsBin ip -4)
-            if (-not $tsIP) { Start-Sleep -Seconds 3; $i++ }
-          }
-          
-          if (-not $tsIP) { Write-Error "Failed to get IP"; exit 1 }
-          echo "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "Tailscale Connected! IP: $tsIP"
-
-      # 3. Tạo User RDP
-      - name: Create User
-        run: |
-          $password = -join ((65..90) + (97..122) + (48..57) | Get-Random -Count 16 | % {[char]$_})
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-          } else { Set-LocalUser -Name "RDP" -Password $securePass }
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          echo "RDP_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      # 4. [Win32Priority] Tối ưu CPU cho ứng dụng
-      - name: Set Win32Priority
-        run: |
-          # Priority 38 (Decimal) = Ưu tiên Foreground Programs
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\PriorityControl" /v Win32PrioritySeparation /t REG_DWORD /d 38 /f
-          Write-Host "Win32Priority set to 38."
-
-      - name: Install Virtual64 Display (Fixed)
+      # 1. CÀI MÀN HÌNH ẢO (BẮT BUỘC - Nếu không có cái này AnyDesk sẽ đen thui)
+      - name: Install Virtual Display (Fix Black Screen)
         run: |
           $url = "https://www.amyuni.com/downloads/usbmmidd_v2.zip"
           $dest = "$env:TEMP\usbmmidd.zip"
           $extract = "C:\usbmmidd"
           
-          Write-Host "Downloading driver..."
           Invoke-WebRequest -Uri $url -OutFile $dest
-          
-          Write-Host "Extracting..."
           Expand-Archive -Path $dest -DestinationPath $extract -Force
           
-          # FIX: Tìm file exe bằng lệnh search (tránh lỗi lệch thư mục)
+          # Tự tìm file exe
           $exePath = Get-ChildItem -Path $extract -Filter "deviceinstaller64.exe" -Recurse | Select-Object -First 1
-          
           if ($exePath) {
-            Write-Host "Found installer at: $($exePath.DirectoryName)"
             Set-Location -Path $exePath.DirectoryName
-            
-            # Cài đặt
-            Write-Host "Installing driver..."
             & .\deviceinstaller64.exe install usbmmidd.inf usbmmidd
-            
-            Write-Host "Activating display..."
             & .\deviceinstaller64.exe enableidd 1
-            
-            Write-Host "Virtual GPU Active."
-          } else {
-            Write-Error "ERROR: Could not find deviceinstaller64.exe in extracted files!"
-            exit 1
+            Write-Host "Virtual Display OK."
           }
 
+      # 2. CÀI ANYDESK & LẤY ID
+      - name: Install & Config AnyDesk
+        run: |
+          # Tải về
+          Invoke-WebRequest -Uri "https://download.anydesk.com/AnyDesk.exe" -OutFile "$env:TEMP\AnyDesk.exe"
 
-      # 6. [Remote64] Tối ưu RDP & Video (No Audio)
-      - name: Optimize Remote64
-        run: |
-          $rdpPath = "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
+          # Tạo mật khẩu mạnh (Bắt buộc phải có chữ hoa, thường, số, ký tự đặc biệt)
+          $password = "GitHub@2025Actions!" 
           
-          # Hardware Acceleration & RemoteFX
-          reg add $rdpPath /v EnableRemoteFX /t REG_DWORD /d 1 /f
-          reg add $rdpPath /v EnableHardwareAcceleration /t REG_DWORD /d 1 /f
+          # Cài đặt
+          & "$env:TEMP\AnyDesk.exe" --install "C:\Program Files (x86)\AnyDesk" --start-with-win --silent
+          Start-Sleep -Seconds 10
           
-      - name: Verify & Keep Alive
+          # Set mật khẩu (Dùng CMD để tránh lỗi PowerShell pipe)
+          $anydesk = "C:\Program Files (x86)\AnyDesk\AnyDesk.exe"
+          cmd.exe /c "echo $password | `"$anydesk`" --set-password"
+          
+          # Lấy ID (Thử lại vài lần nếu chưa kịp hiện)
+          $id = ""
+          for ($i=0; $i -lt 10; $i++) {
+            $id = & $anydesk --get-id
+            if ($id -match "\d+") { break }
+            Start-Sleep -Seconds 3
+          }
+          
+          echo "ANY_ID=$id" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "ANY_PWD=$password" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # 3. TỐI ƯU CPU CHO MƯỢT
+      - name: Optimize Performance
         run: |
-          Write-Host "=== RDP CONNECT INFO ==="
-          Write-Host "IP Address: $env:TAILSCALE_IP"
-          Write-Host "Username  : RDP"
-          Write-Host "Password  : $env:RDP_PASSWORD"
-          Write-Host "Status    : Win32Priority(38) | Virtual64(Active) | Remote64(Accel) | Audio(OFF)"
-          Write-Host "========================"
-          while ($true) { Start-Sleep -Seconds 180; Test-Connection 8.8.8.8 -Count 1 -Quiet | Out-Null }
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\PriorityControl" /v Win32PrioritySeparation /t REG_DWORD /d 38 /f
+          powercfg -setactive SCHEME_MIN
+
+      # 4. HIỆN THÔNG TIN & GIỮ KẾT NỐI
+      - name: Show Info
+        run: |
+          Write-Host "=================================="
+          Write-Host " ANYDESK ID   : $env:ANY_ID"
+          Write-Host " PASSWORD     : $env:ANY_PWD"
+          Write-Host "=================================="
+          
+          # Vòng lặp giữ máy sống
+          while ($true) {
+            Start-Sleep -Seconds 180
+            Test-Connection 8.8.8.8 -Count 1 -Quiet | Out-Null
+          }
