@@ -1,4 +1,4 @@
-name: RDP 
+name: RDP Ultimate (4K Sharpness + 120FPS)
 
 on:
   workflow_dispatch:
@@ -9,28 +9,36 @@ jobs:
     timeout-minutes: 3600
 
     steps:
-      # 1. Cấu hình cơ bản & Tắt Defender (Tối ưu CPU)
+      # 1. Cấu hình cơ bản & Tắt Defender (Max Performance)
       - name: Configure Core & Disable Defender
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          
+          # Mở Port Firewall
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           
-          # Tắt Defender Real-time để giải phóng CPU xử lý hình ảnh RDP
+          # Tắt Windows Defender Real-time
           Set-MpPreference -DisableRealtimeMonitoring $true -DisableIOAVProtection $true -DisableArchiveScanning $true
-          Write-Host "Windows Defender Disabled for Max Performance."
+          Write-Host "Windows Defender Real-time Protection Disabled."
 
-      # 2. Tạo User
+      # 2. Tạo User & Pass
       - name: Create RDP User
         run: |
           Add-Type -AssemblyName System.Security
-          $charSet = @{Upper=[char[]](65..90); Lower=[char[]](97..122); Number=[char[]](48..57)}
+          $charSet = @{
+              Upper   = [char[]](65..90)
+              Lower   = [char[]](97..122)
+              Number  = [char[]](48..57)
+              Special = ([char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126))
+          }
           $rawPassword = @()
           $rawPassword += $charSet.Upper | Get-Random -Count 4
           $rawPassword += $charSet.Lower | Get-Random -Count 4
           $rawPassword += $charSet.Number | Get-Random -Count 4
+          $rawPassword += $charSet.Special | Get-Random -Count 4
           $password = -join ($rawPassword | Sort-Object { Get-Random })
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
           
@@ -43,7 +51,7 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
 
-      # 3. Tăng RAM ảo 8GB
+      # 3. Tăng RAM ảo (Pagefile) 8GB
       - name: Boost Virtual Memory
         run: |
           Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management' -Name 'PagingFiles' -Value 'D:\pagefile.sys 8192 8192'
@@ -57,8 +65,8 @@ jobs:
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
 
-      # 5. Kết nối Tailscale & Tối ưu MTU (QUAN TRỌNG CHO ĐỘ TRỄ)
-      - name: Connect Tailscale & Optimize MTU
+      # 5. Kết nối Tailscale
+      - name: Connect Tailscale
         run: |
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
           $tsIP = $null
@@ -68,23 +76,20 @@ jobs:
               Start-Sleep -Seconds 5
               $retries++
           }
-          # Force MTU 1280 để gói tin đi nhanh hơn qua VPN
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" set --mtu=1280
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
       # 6. Cài Software
-      - name: Install Tools
+      - name: Install Essential Tools
         run: |
           Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
           choco install googlechrome notepadplusplus 7zip imdisk neatdownloadmanager vlc vscode -y
           reg add "HKLM\SOFTWARE\Microsoft\ServerManager" /v DoNotOpenServerManagerAtLogon /t REG_DWORD /d 1 /f
 
-      # 7. Tối ưu Hệ thống & Tắt Services gây lag mạng
+      # 7. Tối ưu Hệ thống
       - name: System Tweaks
         run: |
           Set-TimeZone -Id "SE Asia Standard Time"
-          # Tắt BITS và Windows Update Delivery Optimization để dành băng thông cho RDP
-          $services = @("SysMain", "DiagTrack", "MapsBroker", "DoSvc", "BITS")
+          $services = @("SysMain", "DiagTrack", "MapsBroker", "XblAuthManager", "XblGameSave", "XboxNetApiSvc")
           foreach ($service in $services) {
             if (Get-Service -Name $service -ErrorAction SilentlyContinue) {
               Stop-Service -Name $service -Force
@@ -92,67 +97,66 @@ jobs:
             }
           }
 
-      # 8. TỐI ƯU MẠNG CHUYÊN SÂU (NETWORK LATENCY KILLER)
-      - name: Optimize Network for Zero Latency
-        run: |
-          # 1. Bật thuật toán CTCP (Compound TCP) - Tốt nhất cho đường truyền xa
-          netsh int tcp set global congestionprovider=ctcp
-          
-          # 2. Tắt các tính năng tự động làm chậm mạng
-          netsh int tcp set global autotuninglevel=normal
-          netsh int tcp set global rss=enabled
-          netsh int tcp set global chimney=enabled
-          
-          # 3. Registry Tweak: TCP No Delay (Tắt Nagle's Algorithm)
-          # Giúp chuột và phím phản hồi tức thì
-          reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" /v TcpAckFrequency /t REG_DWORD /d 1 /f
-          reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" /v TCPNoDelay /t REG_DWORD /d 1 /f
-          reg add "HKLM\SOFTWARE\Microsoft\MSMQ\Parameters" /v TCPNoDelay /t REG_DWORD /d 1 /f
-
-      # 9. Tối ưu Visuals (Cân bằng giữa Đẹp và Mượt)
-      - name: Optimize RDP (120FPS + High Performance)
+      # 8. Tối ưu Hiển thị (Crystal Clear + 120FPS)
+      - name: Optimize Visuals (Sharpness & 120FPS)
         run: |
           powercfg -setactive SCHEME_MIN
           
-          # Visuals: Tắt hết hiệu ứng thừa, giữ lại ClearType để dễ đọc chữ
+          # [SHARPNESS] Bật Font Smoothing (ClearType) - Giúp chữ siêu nét
           reg add "HKCU\Control Panel\Desktop" /v FontSmoothing /t REG_SZ /d "2" /f
+          reg add "HKCU\Control Panel\Desktop" /v FontSmoothingType /t REG_DWORD /d 2 /f
+          reg add "HKCU\Control Panel\Desktop" /v FontSmoothingGamma /t REG_DWORD /d 0 /f
+          reg add "HKCU\Control Panel\Desktop" /v FontSmoothingOrientation /t REG_DWORD /d 1 /f
+
+          # [SHARPNESS] Bật AVC 444 Mode (Hiển thị màu sắc chuẩn pixel, không bị mờ)
+          reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v fEnableAVC444Mode /t REG_DWORD /d 1 /f
+          reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\RemoteDesktop" /v AVC444ModePreferred /t REG_DWORD /d 1 /f
+          
+          # [VISUALS] Tắt hình nền (Để tập trung băng thông cho độ nét của chữ/ứng dụng)
           reg add "HKCU\Software\Microsoft\Terminal Server Client" /v DisableWallpaper /t REG_DWORD /d 1 /f
           reg add "HKCU\Software\Microsoft\Terminal Server Client" /v DisableThemes /t REG_DWORD /d 1 /f
-          reg add "HKCU\Software\Microsoft\Terminal Server Client" /v DisableMenuAnimations /t REG_DWORD /d 1 /f
-          reg add "HKCU\Software\Microsoft\Terminal Server Client" /v DisableFullWindowDrag /t REG_DWORD /d 1 /f
           
-          # Protocol: Ưu tiên nén dữ liệu và GPU
+          # [QUALITY] Color Depth 32-bit & Compression
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v ColorDepth /t REG_DWORD /d 32 /f
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v fEnableCompression /t REG_DWORD /d 1 /f
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v ColorDepth /t REG_DWORD /d 32 /f
           
-          # [QUAN TRỌNG] 120 FPS Unlock
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v DwmFrameRate /t REG_DWORD /d 120 /f
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v EnableDwm /t REG_DWORD /d 1 /f
-          
-          # GPU Hardware Acceleration
-          reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\RemoteDesktop" /v UseHardwareEncoding /t REG_DWORD /d 1 /f
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v EnableHardwareAcceleration /t REG_DWORD /d 1 /f
-          
-          # Audio Service
+          # [AUDIO] Bật âm thanh
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v fEnableAudioRedirection /t REG_DWORD /d 1 /f
           Set-Service -Name Audiosrv -StartupType Automatic
           Start-Service -Name Audiosrv
+          Set-Service -Name AudioEndpointBuilder -StartupType Automatic
+          Start-Service -Name AudioEndpointBuilder
+          
+          # [PERFORMANCE] GPU Acceleration & 120 FPS
+          reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\RemoteDesktop" /v UseHardwareEncoding /t REG_DWORD /d 1 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v EnableHardwareAcceleration /t REG_DWORD /d 1 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v DwmFrameRate /t REG_DWORD /d 120 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v EnableDwm /t REG_DWORD /d 1 /f
 
       - name: Verify RDP Accessibility
         run: |
           $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
-          if (-not $testResult.TcpTestSucceeded) { Write-Error "RDP Port Failed"; exit 1 }
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
+          }
 
       - name: Maintain Connection
         run: |
           Write-Host "`n==============================================="
-          Write-Host "      RDP LOW LATENCY (ESPORTS MODE)           "
+          Write-Host "     RDP ULTIMATE (SHARP 4K + 120FPS)          "
           Write-Host "==============================================="
           Write-Host "IP Address  : $env:TAILSCALE_IP"
           Write-Host "Username    : RDP"
           Write-Host "Password    : $env:RDP_PASSWORD"
           Write-Host "-----------------------------------------------"
-          Write-Host "Network     : TCP NoDelay (ON) | CTCP (ON)"
-          Write-Host "Frame Rate  : 120 FPS"
-          Write-Host "Ping Fix    : MTU Optimized for Tailscale"
+          Write-Host "Visuals     : AVC 444 (Sharp Text) + 120 FPS"
+          Write-Host "Defender    : DISABLED"
+          Write-Host "Tools       : Chrome, IDM(fake), VLC, VSCode"
+          Write-Host "Region      : Vietnam (UTC+7)"
           Write-Host "===============================================`n"
-          while ($true) { Start-Sleep -Seconds 300 }
+          
+          while ($true) {
+              Write-Host "[$(Get-Date)] Session Active. Press Cancel to stop."
+              Start-Sleep -Seconds 300
+          }
