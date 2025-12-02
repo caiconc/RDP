@@ -1,4 +1,4 @@
-Name: RDP Low Latency (Esports Mode)
+Name: RDP
 
 on:
   workflow_dispatch:
