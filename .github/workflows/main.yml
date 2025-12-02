@@ -84,19 +84,38 @@ jobs:
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\PriorityControl" /v Win32PrioritySeparation /t REG_DWORD /d 38 /f
           Write-Host "Win32Priority set to 38."
 
-      # 5. [Virtual64] Cài đặt GPU ảo
-      - name: Install Virtual64 Display
+      - name: Install Virtual64 Display (Fixed)
         run: |
           $url = "https://www.amyuni.com/downloads/usbmmidd_v2.zip"
-          $dest = "C:\usbmmidd.zip"
+          $dest = "$env:TEMP\usbmmidd.zip"
           $extract = "C:\usbmmidd"
+          
+          Write-Host "Downloading driver..."
           Invoke-WebRequest -Uri $url -OutFile $dest
+          
+          Write-Host "Extracting..."
           Expand-Archive -Path $dest -DestinationPath $extract -Force
-          cd $extract
-          Write-Host "Installing Virtual Display Driver..."
-          & .\deviceinstaller64.exe install usbmmidd.inf usbmmidd
-          & .\deviceinstaller64.exe enableidd 1
-          Write-Host "Virtual GPU Active."
+          
+          # FIX: Tìm file exe bằng lệnh search (tránh lỗi lệch thư mục)
+          $exePath = Get-ChildItem -Path $extract -Filter "deviceinstaller64.exe" -Recurse | Select-Object -First 1
+          
+          if ($exePath) {
+            Write-Host "Found installer at: $($exePath.DirectoryName)"
+            Set-Location -Path $exePath.DirectoryName
+            
+            # Cài đặt
+            Write-Host "Installing driver..."
+            & .\deviceinstaller64.exe install usbmmidd.inf usbmmidd
+            
+            Write-Host "Activating display..."
+            & .\deviceinstaller64.exe enableidd 1
+            
+            Write-Host "Virtual GPU Active."
+          } else {
+            Write-Error "ERROR: Could not find deviceinstaller64.exe in extracted files!"
+            exit 1
+          }
+
 
       # 6. [Remote64] Tối ưu RDP & Video (No Audio)
       - name: Optimize Remote64
