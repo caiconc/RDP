@@ -126,23 +126,6 @@ jobs:
           reg add $rdpPath /v EnableRemoteFX /t REG_DWORD /d 1 /f
           reg add $rdpPath /v EnableHardwareAcceleration /t REG_DWORD /d 1 /f
           
-
-      # 7. Dọn dẹp hệ thống & Tắt Services rác
-      - name: System Cleanup
-        run: |
-          # Tắt Defender Real-time (Tăng tốc I/O)
-          Set-MpPreference -DisableRealtimeMonitoring $true -Force
-          
-          # Tắt Services: SysMain, Search, Audio, Xbox
-          $services = @("SysMain", "DiagTrack", "WSearch", "Audiosrv", "AudioEndpointBuilder", "XblAuthManager", "XblGameSave")
-          foreach ($s in $services) {
-            Stop-Service -Name $s -Force -ErrorAction SilentlyContinue
-            Set-Service -Name $s -StartupType Disabled
-          }
-          
-          # Power Plan High Performance
-          powercfg -setactive SCHEME_MIN
-
       - name: Verify & Keep Alive
         run: |
           Write-Host "=== RDP CONNECT INFO ==="
