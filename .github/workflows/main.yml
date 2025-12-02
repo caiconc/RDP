@@ -1,4 +1,4 @@
-name: RDP Win32-Virtual64-Remote64
+name: RDP Optimized (Fixed Tailscale)
 
 on:
   workflow_dispatch:
@@ -16,28 +16,53 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
           
-          # Firewall: Chỉ cho phép IP Tailscale
+          # Firewall: Allow Tailscale Subnet only
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389 remoteip=100.64.0.0/10 profile=any
           
           Restart-Service -Name TermService -Force
 
-      # 2. Cài đặt Tailscale
-      - name: Install Tailscale
+      # 2. INSTALL TAILSCALE (SỬA LẠI LOGIC CHUẨN)
+      - name: Install & Connect Tailscale
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
-
-      - name: Install Tailscale
-        run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
+          # Tải Installer
+          Write-Host "Downloading Tailscale MSI..."
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest.msi"
+          $path = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $url -OutFile $path
+          
+          # Cài đặt Silent
+          Write-Host "Installing..."
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$path`"", "/quiet", "/norestart" -Wait
+          Remove-Item $path -Force
+          
+          # Đợi service khởi động (quan trọng để tránh lỗi Backend not running)
+          Start-Sleep -Seconds 10
+          
+          # Authenticate với các cờ quan trọng cho Headless
+          Write-Host "Authenticating Tailscale..."
+          $tsBin = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          
+          & $tsBin up `
+            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
+            --hostname="gh-runner-$env:GITHUB_RUN_ID" `
+            --unattended `
+            --reset `
+            --force-reauth `
+            --accept-routes
+          
+          # Lấy IP (Thử lại nếu chưa có ngay)
+          $tsIP = $null
+          $i = 0
+          while (-not $tsIP -and $i -lt 10) {
+            $tsIP = (& $tsBin ip -4)
+            if (-not $tsIP) { Start-Sleep -Seconds 3; $i++ }
+          }
+          
+          if (-not $tsIP) { Write-Error "Could not get Tailscale IP"; exit 1 }
+          
+          Write-Host "Tailscale IP: $tsIP"
+          echo "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       # 3. Tạo User RDP
       - name: Create User
@@ -51,66 +76,42 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           echo "RDP_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      # --- [YÊU CẦU 1] WIN32 PRIORITY ---
-      - name: Set Win32Priority (CPU Optimization)
+      # 4. Win32Priority (CPU Optimization)
+      - name: Set Win32Priority
         run: |
-          # Giá trị 38 (Decimal) = 0x26 (Hex)
-          # Ý nghĩa: Ưu tiên ứng dụng Foreground (Programs), Short intervals, Variable quantum.
-          # Giúp giảm độ trễ khi di chuột và gõ phím.
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\PriorityControl" /v Win32PrioritySeparation /t REG_DWORD /d 38 /f
-          Write-Host "Win32PrioritySeparation set to 38 (Programs Priority)"
 
-      # --- [YÊU CẦU 2] VIRTUAL64 (DRIVER MÀN HÌNH ẢO) ---
-      - name: Install Virtual64 (usbmmidd Display Driver)
+      # 5. Virtual64 (Fake GPU Driver)
+      - name: Install Virtual64 Display
         run: |
-          # Tải driver giả lập màn hình 64-bit
           $url = "https://www.amyuni.com/downloads/usbmmidd_v2.zip"
           $dest = "C:\usbmmidd.zip"
           $extract = "C:\usbmmidd"
           Invoke-WebRequest -Uri $url -OutFile $dest
           Expand-Archive -Path $dest -DestinationPath $extract -Force
-          
-          # Cài đặt Driver 64-bit
           cd $extract
-          Write-Host "Installing Virtual Display Driver..."
           & .\deviceinstaller64.exe install usbmmidd.inf usbmmidd
-          
-          # Kích hoạt màn hình ảo
-          Write-Host "Enabling Virtual Display..."
           & .\deviceinstaller64.exe enableidd 1
-          
-          Write-Host "Virtual64 Display Active."
 
-      # --- [YÊU CẦU 3] REMOTE64 (RDP HARDWARE ACCELERATION) ---
-      - name: Optimize Remote64 (RemoteFX & GPU)
+      # 6. Remote64 (RDP Hardware Acceleration)
+      - name: Optimize Remote64
         run: |
           $rdpPath = "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
-          
-          # Bật RemoteFX (Giao thức đồ họa cao cấp)
           reg add $rdpPath /v EnableRemoteFX /t REG_DWORD /d 1 /f
-          
-          # Ép buộc Hardware Acceleration (Kể cả khi dùng Virtual GPU)
           reg add $rdpPath /v EnableHardwareAcceleration /t REG_DWORD /d 1 /f
-          
-          # Tối ưu hóa băng thông cho Video (Bỏ Audio)
           reg add $rdpPath /v fEnableVideoRedirection /t REG_DWORD /d 1 /f
           reg add $rdpPath /v VideoCompression /t REG_DWORD /d 1 /f
           reg add $rdpPath /v fEnableAudioRedirection /t REG_DWORD /d 0 /f
-          
-          # Frame Rate ổn định cho Virtual GPU
           reg add $rdpPath /v DwmFrameRate /t REG_DWORD /d 60 /f
           
-          # Tắt hiệu ứng thừa (Visuals)
+          # Cleanup Visuals
           $visualPath = "HKCU\Software\Microsoft\Terminal Server Client"
           reg add $visualPath /v DisableWallpaper /t REG_DWORD /d 1 /f
           reg add $visualPath /v DisableThemes /t REG_DWORD /d 1 /f
 
-      - name: System Cleanup (Disk & Services)
+      - name: System Cleanup
         run: |
-          # Tắt Defender Real-time (Tăng tốc I/O cực mạnh)
           Set-MpPreference -DisableRealtimeMonitoring $true -Force
-          
-          # Tắt các service không cần thiết
           $services = @("SysMain", "DiagTrack", "WSearch", "Audiosrv")
           foreach ($s in $services) {
             Stop-Service -Name $s -Force -ErrorAction SilentlyContinue
@@ -120,10 +121,9 @@ jobs:
 
       - name: Verify & Keep Alive
         run: |
-          Write-Host "=== RDP INFO ==="
+          Write-Host "=== RDP CONNECT INFO ==="
           Write-Host "IP: $env:TAILSCALE_IP"
           Write-Host "User: RDP"
           Write-Host "Pass: $env:RDP_PASSWORD"
-          Write-Host "Config: Win32Priority(38) | Virtual64(Active) | Remote64(Accel)"
-          Write-Host "================"
+          Write-Host "========================"
           while ($true) { Start-Sleep -Seconds 180; Test-Connection 8.8.8.8 -Count 1 -Quiet | Out-Null }
