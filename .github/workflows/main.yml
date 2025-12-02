@@ -68,6 +68,28 @@ jobs:
           }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
+      - name: Set Language and Region to Vietnam
+        run: |
+          Set-WinSystemLocale vi-VN
+          Set-WinUserLanguageList vi-VN -Force
+          Set-Culture vi-VN
+          Set-WinUILanguageOverride vi-VN
+          Set-WinHomeLocation -GeoId 237
+          Write-Host "Ngôn ngữ và vùng đã được đặt sang Việt Nam"
+
+      - name: Enable High Performance Power Plan
+        run: powercfg -setactive SCHEME_MIN
+
+      - name: Optimize RDP Visuals and UX
+        run: |
+          reg add "HKCU\Software\Microsoft\Terminal Server Client" /v DisableWallpaper /t REG_DWORD /d 1 /f
+          reg add "HKCU\Software\Microsoft\Terminal Server Client" /v DisableFullWindowDrag /t REG_DWORD /d 1 /f
+          reg add "HKCU\Software\Microsoft\Terminal Server Client" /v DisableMenuAnimations /t REG_DWORD /d 1 /f
+          reg add "HKCU\Software\Microsoft\Terminal Server Client" /v DisableThemes /t REG_DWORD /d 1 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v fEnableCompression /t REG_DWORD /d 1 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v ColorDepth /t REG_DWORD /d 32 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v BitmapCacheSize /t REG_DWORD /d 32 /f
+
       - name: Enable High Performance Power Plan
         run: powercfg -setactive SCHEME_MIN
 
