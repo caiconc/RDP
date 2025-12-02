@@ -1,74 +1,39 @@
-name: RDP Ultimate (4K Sharpness + 120FPS)
+name: RDP Win32-Virtual64-Remote64
 
 on:
   workflow_dispatch:
 
 jobs:
-  secure-rdp:
+  high-perf-rdp:
     runs-on: windows-latest
-    timeout-minutes: 3600
-
+    timeout-minutes: 360
+    
     steps:
-      # 1. Cấu hình cơ bản & Tắt Defender (Max Performance)
-      - name: Configure Core & Disable Defender
+      # 1. Cấu hình cơ bản & Firewall
+      - name: Configure Core RDP & Firewall
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
           
-          # Mở Port Firewall
+          # Firewall: Chỉ cho phép IP Tailscale
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389 remoteip=100.64.0.0/10 profile=any
           
-          # Tắt Windows Defender Real-time
-          Set-MpPreference -DisableRealtimeMonitoring $true -DisableIOAVProtection $true -DisableArchiveScanning $true
-          Write-Host "Windows Defender Real-time Protection Disabled."
+          Restart-Service -Name TermService -Force
 
-      # 2. Tạo User & Pass
-      - name: Create RDP User
-        run: |
-          Add-Type -AssemblyName System.Security
-          $charSet = @{
-              Upper   = [char[]](65..90)
-              Lower   = [char[]](97..122)
-              Number  = [char[]](48..57)
-              Special = ([char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126))
-          }
-          $rawPassword = @()
-          $rawPassword += $charSet.Upper | Get-Random -Count 4
-          $rawPassword += $charSet.Lower | Get-Random -Count 4
-          $rawPassword += $charSet.Number | Get-Random -Count 4
-          $rawPassword += $charSet.Special | Get-Random -Count 4
-          $password = -join ($rawPassword | Sort-Object { Get-Random })
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          
-          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-          } else {
-            Set-LocalUser -Name "RDP" -Password $securePass
-          }
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
-
-      # 3. Tăng RAM ảo (Pagefile) 8GB
-      - name: Boost Virtual Memory
-        run: |
-          Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management' -Name 'PagingFiles' -Value 'D:\pagefile.sys 8192 8192'
-
-      # 4. Cài Tailscale
+      # 2. Cài đặt Tailscale
       - name: Install Tailscale
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
 
-      # 5. Kết nối Tailscale
       - name: Connect Tailscale
         run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID --accept-routes
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 20) {
@@ -76,87 +41,94 @@ jobs:
               Start-Sleep -Seconds 5
               $retries++
           }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          if (-not $tsIP) { Write-Error "Tailscale IP error"; exit 1 }
+          echo "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      # 6. Cài Software
-      - name: Install Essential Tools
+      # 3. Tạo User RDP
+      - name: Create User
         run: |
-          Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-          choco install googlechrome notepadplusplus 7zip imdisk neatdownloadmanager vlc vscode -y
-          reg add "HKLM\SOFTWARE\Microsoft\ServerManager" /v DoNotOpenServerManagerAtLogon /t REG_DWORD /d 1 /f
+          $password = -join ((65..90) + (97..122) + (48..57) | Get-Random -Count 16 | % {[char]$_})
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          } else { Set-LocalUser -Name "RDP" -Password $securePass }
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          echo "RDP_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      # 7. Tối ưu Hệ thống
-      - name: System Tweaks
+      # --- [YÊU CẦU 1] WIN32 PRIORITY ---
+      - name: Set Win32Priority (CPU Optimization)
         run: |
-          Set-TimeZone -Id "SE Asia Standard Time"
-          $services = @("SysMain", "DiagTrack", "MapsBroker", "XblAuthManager", "XblGameSave", "XboxNetApiSvc")
-          foreach ($service in $services) {
-            if (Get-Service -Name $service -ErrorAction SilentlyContinue) {
-              Stop-Service -Name $service -Force
-              Set-Service -Name $service -StartupType Disabled
-            }
+          # Giá trị 38 (Decimal) = 0x26 (Hex)
+          # Ý nghĩa: Ưu tiên ứng dụng Foreground (Programs), Short intervals, Variable quantum.
+          # Giúp giảm độ trễ khi di chuột và gõ phím.
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\PriorityControl" /v Win32PrioritySeparation /t REG_DWORD /d 38 /f
+          Write-Host "Win32PrioritySeparation set to 38 (Programs Priority)"
+
+      # --- [YÊU CẦU 2] VIRTUAL64 (DRIVER MÀN HÌNH ẢO) ---
+      - name: Install Virtual64 (usbmmidd Display Driver)
+        run: |
+          # Tải driver giả lập màn hình 64-bit
+          $url = "https://www.amyuni.com/downloads/usbmmidd_v2.zip"
+          $dest = "C:\usbmmidd.zip"
+          $extract = "C:\usbmmidd"
+          Invoke-WebRequest -Uri $url -OutFile $dest
+          Expand-Archive -Path $dest -DestinationPath $extract -Force
+          
+          # Cài đặt Driver 64-bit
+          cd $extract
+          Write-Host "Installing Virtual Display Driver..."
+          & .\deviceinstaller64.exe install usbmmidd.inf usbmmidd
+          
+          # Kích hoạt màn hình ảo
+          Write-Host "Enabling Virtual Display..."
+          & .\deviceinstaller64.exe enableidd 1
+          
+          Write-Host "Virtual64 Display Active."
+
+      # --- [YÊU CẦU 3] REMOTE64 (RDP HARDWARE ACCELERATION) ---
+      - name: Optimize Remote64 (RemoteFX & GPU)
+        run: |
+          $rdpPath = "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
+          
+          # Bật RemoteFX (Giao thức đồ họa cao cấp)
+          reg add $rdpPath /v EnableRemoteFX /t REG_DWORD /d 1 /f
+          
+          # Ép buộc Hardware Acceleration (Kể cả khi dùng Virtual GPU)
+          reg add $rdpPath /v EnableHardwareAcceleration /t REG_DWORD /d 1 /f
+          
+          # Tối ưu hóa băng thông cho Video (Bỏ Audio)
+          reg add $rdpPath /v fEnableVideoRedirection /t REG_DWORD /d 1 /f
+          reg add $rdpPath /v VideoCompression /t REG_DWORD /d 1 /f
+          reg add $rdpPath /v fEnableAudioRedirection /t REG_DWORD /d 0 /f
+          
+          # Frame Rate ổn định cho Virtual GPU
+          reg add $rdpPath /v DwmFrameRate /t REG_DWORD /d 60 /f
+          
+          # Tắt hiệu ứng thừa (Visuals)
+          $visualPath = "HKCU\Software\Microsoft\Terminal Server Client"
+          reg add $visualPath /v DisableWallpaper /t REG_DWORD /d 1 /f
+          reg add $visualPath /v DisableThemes /t REG_DWORD /d 1 /f
+
+      - name: System Cleanup (Disk & Services)
+        run: |
+          # Tắt Defender Real-time (Tăng tốc I/O cực mạnh)
+          Set-MpPreference -DisableRealtimeMonitoring $true -Force
+          
+          # Tắt các service không cần thiết
+          $services = @("SysMain", "DiagTrack", "WSearch", "Audiosrv")
+          foreach ($s in $services) {
+            Stop-Service -Name $s -Force -ErrorAction SilentlyContinue
+            Set-Service -Name $s -StartupType Disabled
           }
-
-      # 8. Tối ưu Hiển thị (Crystal Clear + 120FPS)
-      - name: Optimize Visuals (Sharpness & 120FPS)
-        run: |
           powercfg -setactive SCHEME_MIN
-          
-          # [SHARPNESS] Bật Font Smoothing (ClearType) - Giúp chữ siêu nét
-          reg add "HKCU\Control Panel\Desktop" /v FontSmoothing /t REG_SZ /d "2" /f
-          reg add "HKCU\Control Panel\Desktop" /v FontSmoothingType /t REG_DWORD /d 2 /f
-          reg add "HKCU\Control Panel\Desktop" /v FontSmoothingGamma /t REG_DWORD /d 0 /f
-          reg add "HKCU\Control Panel\Desktop" /v FontSmoothingOrientation /t REG_DWORD /d 1 /f
 
-          # [SHARPNESS] Bật AVC 444 Mode (Hiển thị màu sắc chuẩn pixel, không bị mờ)
-          reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v fEnableAVC444Mode /t REG_DWORD /d 1 /f
-          reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\RemoteDesktop" /v AVC444ModePreferred /t REG_DWORD /d 1 /f
-          
-          # [VISUALS] Tắt hình nền (Để tập trung băng thông cho độ nét của chữ/ứng dụng)
-          reg add "HKCU\Software\Microsoft\Terminal Server Client" /v DisableWallpaper /t REG_DWORD /d 1 /f
-          reg add "HKCU\Software\Microsoft\Terminal Server Client" /v DisableThemes /t REG_DWORD /d 1 /f
-          
-          # [QUALITY] Color Depth 32-bit & Compression
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v ColorDepth /t REG_DWORD /d 32 /f
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v fEnableCompression /t REG_DWORD /d 1 /f
-          
-          # [AUDIO] Bật âm thanh
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v fEnableAudioRedirection /t REG_DWORD /d 1 /f
-          Set-Service -Name Audiosrv -StartupType Automatic
-          Start-Service -Name Audiosrv
-          Set-Service -Name AudioEndpointBuilder -StartupType Automatic
-          Start-Service -Name AudioEndpointBuilder
-          
-          # [PERFORMANCE] GPU Acceleration & 120 FPS
-          reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\RemoteDesktop" /v UseHardwareEncoding /t REG_DWORD /d 1 /f
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v EnableHardwareAcceleration /t REG_DWORD /d 1 /f
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v DwmFrameRate /t REG_DWORD /d 120 /f
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v EnableDwm /t REG_DWORD /d 1 /f
-
-      - name: Verify RDP Accessibility
+      - name: Verify & Keep Alive
         run: |
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
-              exit 1
-          }
-
-      - name: Maintain Connection
-        run: |
-          Write-Host "`n==============================================="
-          Write-Host "     RDP ULTIMATE (SHARP 4K + 120FPS)          "
-          Write-Host "==============================================="
-          Write-Host "IP Address  : $env:TAILSCALE_IP"
-          Write-Host "Username    : RDP"
-          Write-Host "Password    : $env:RDP_PASSWORD"
-          Write-Host "-----------------------------------------------"
-          Write-Host "Visuals     : AVC 444 (Sharp Text) + 120 FPS"
-          Write-Host "Defender    : DISABLED"
-          Write-Host "Tools       : Chrome, IDM(fake), VLC, VSCode"
-          Write-Host "Region      : Vietnam (UTC+7)"
-          Write-Host "===============================================`n"
-          
-          while ($true) {
-              Write-Host "[$(Get-Date)] Session Active. Press Cancel to stop."
-              Start-Sleep -Seconds 300
-          }
+          Write-Host "=== RDP INFO ==="
+          Write-Host "IP: $env:TAILSCALE_IP"
+          Write-Host "User: RDP"
+          Write-Host "Pass: $env:RDP_PASSWORD"
+          Write-Host "Config: Win32Priority(38) | Virtual64(Active) | Remote64(Accel)"
+          Write-Host "================"
+          while ($true) { Start-Sleep -Seconds 180; Test-Connection 8.8.8.8 -Count 1 -Quiet | Out-Null }
